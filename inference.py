@@ -9,6 +9,7 @@ import os
 from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader
 import csv
+import concurrent.futures
 
 characters = "abcdefghijklmnopqrstuvwxyz0123456789"
 char_to_idx = {char: idx + 1 for idx, char in enumerate(characters)}
@@ -42,36 +43,35 @@ def ctc_greedy_decoder(logits, blank=0):
     pred_str = ''.join([idx_to_char[idx] for idx in pred_tokens])
     return pred_str
 
-def run_inference():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("Inference on device:", device)
+def run_inference_for_epoch(epoch, gpu_id):
+    device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
+    print(f"Inference on device: {device} for epoch: {epoch}")
 
     # Hyperparameters
-    # num_gateblocks = 8
     input_channels = 3
-    # mid1_channels = 64
-    # mid2_channels = 512
-    hidden_channels = 256
+    hidden_channels = 128
     pretrained = True
     backbone = "resnet50"
-    num_lstm_layers = 2
-    model_name = "CRNN_epoch14_resnet50_True_lstmhidden256_lstmlayer2_channel3_lr0.001_batchsize32"
+    num_lstm_layers = 4
+    # model_name = f"CRNN_epoch{epoch}_resnet50_True_lstmhidden256_lstmlayer4_channel3_lr0.001_batchsize64"
+    model_name = f"BaseCNN_epoch{epoch}_hidden128_channel3_lr0.001_batchsize16"
 
     # Instantiate the model
-    # model = GateCNN(num_classes=num_classes, num_gateblocks=num_gateblocks,
-    #                 input_channels=input_channels, mid1_channels=mid1_channels,
-    #                 mid2_channels=mid2_channels)
-    # model = BaseCNN(num_classes=num_classes, hidden_channels=hidden_channels)
-    model = CRNN(num_chars=num_classes, hidden_size=hidden_channels, backbone=backbone, pretrained=pretrained,
-        num_lstm_layers=num_lstm_layers)
-
-    # os.environ["CUDA_VISIBLE_DEVICES"] = "4,5"
-    if torch.cuda.device_count() > 1:
-        print(f"Using {torch.cuda.device_count()} GPUs for training.")
-        model = nn.DataParallel(model)
+    model = BaseCNN(num_classes=num_classes, hidden_channels=hidden_channels)
+    # model = CRNN(num_chars=num_classes, hidden_size=hidden_channels, backbone=backbone,
+    #              pretrained=pretrained, num_lstm_layers=num_lstm_layers)
     model = model.to(device)
-    checkpoint = torch.load(f"checkpoints/{model_name}.pth", map_location=device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+
+    # Load the checkpoint for the current epoch
+    checkpoint_path = f"checkpoints/{model_name}.pth"
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    state_dict = checkpoint["model_state_dict"]
+    # Remove "module." prefix
+    new_state_dict = {}
+    for key, value in state_dict.items():
+        new_key = key.replace("module.", "") if key.startswith("module.") else key
+        new_state_dict[new_key] = value
+    model.load_state_dict(new_state_dict)
     model.eval()
 
     transform = transforms.Compose([
@@ -88,7 +88,7 @@ def run_inference():
 
     with torch.no_grad():
         for image, image_path in dataloader:
-            image = image.to(device) 
+            image = image.to(device)
             logits = model(image)  # (B, num_classes, T)
             logits = logits.squeeze(0)  # (num_classes, T)
             pred_str = ctc_greedy_decoder(logits, blank=0)
@@ -104,13 +104,13 @@ def run_inference():
             if pred_str == ground_truth:
                 correct += 1
 
-            print(f"{ground_truth} -> {pred_str}")
-
     accuracy = correct / total if total > 0 else 0.0
+    print(f"Epoch {epoch} Accuracy: {accuracy:.4f}")
     results.append(["Accuracy", f"{accuracy:.4f}"])
 
     # Write the results to a CSV file
     csv_file = f"test_results/test_results_{model_name}.csv"
+    os.makedirs(os.path.dirname(csv_file), exist_ok=True)
     with open(csv_file, mode="w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["Ground Truth", "Prediction"])
@@ -118,6 +118,29 @@ def run_inference():
             writer.writerow(row)
 
     print(f"Results written to {csv_file}")
+    return accuracy
+
+def main():
+    epochs = range(10, 26)
+    accuracies = {}
+
+    with concurrent.futures.ProcessPoolExecutor(max_workers=8) as executor:
+        future_to_epoch = {}
+        for i, epoch in enumerate(epochs):
+            gpu_id = i % 8 
+            future = executor.submit(run_inference_for_epoch, epoch, gpu_id)
+            future_to_epoch[future] = epoch
+
+        for future in concurrent.futures.as_completed(future_to_epoch):
+            epoch = future_to_epoch[future]
+            try:
+                acc = future.result()
+                accuracies[epoch] = acc
+            except Exception as exc:
+                print(f"Epoch {epoch} generated an exception: {exc}")
+
+    for epoch in sorted(accuracies):
+        print(f"Epoch {epoch}: Accuracy = {accuracies[epoch]:.4f}")
 
 if __name__ == "__main__":
-    run_inference()
+    main()

@@ -19,7 +19,7 @@ def character_accuracy(gt: str, pred: str) -> float:
     return lcs_len / len(gt)
 
 def main():
-    model_name = "CRNN_epoch13_resnet50_True_lstmhidden256_lstmlayer2_channel3_lr0.001_batchsize32"
+    model_name = "BaseCNN_epoch25_hidden128_channel3_lr0.001_batchsize16"
     csv_file = f"test_results/test_results_{model_name}.csv"
     global_lcs = 0
     total_gt_chars = 0

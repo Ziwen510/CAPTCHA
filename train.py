@@ -102,7 +102,7 @@ def train_model(resume_checkpoint=None, extra_epochs=20, start_epoch=0):
         model.load_state_dict(checkpoint['model_state_dict'])
         # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         # model.load_state_dict(checkpoint)
-        print(f"Resuming training from epoch {start_epoch} for {extra_epochs} additional epochs (total epochs: {total_epochs}).")
+        print(f"Resuming training from epoch {start_epoch} for {extra_epochs} additional epochs.")
     else:
         if resume_checkpoint is not None:
             print(f"Checkpoint file {resume_checkpoint} not found. Starting training from scratch.")
@@ -156,7 +156,7 @@ def train_model(resume_checkpoint=None, extra_epochs=20, start_epoch=0):
         print(f"Checkpoint for epoch {epoch+1} saved at {checkpoint_path_epoch}")
 
 if __name__ == "__main__":
-    # resume_checkpoint = "checkpoints/BaseCNN_epoch15_hidden128_channel3_lr0.001_batchsize16.pth"
-    # extra_epochs = 10
-    # start_epoch = 15
-    train_model()
+    resume_checkpoint = "checkpoints/CRNN_epoch20_resnet50_True_lstmhidden256_lstmlayer4_channel3_lr0.001_batchsize64.pth"
+    extra_epochs = 25
+    start_epoch = 20
+    train_model(resume_checkpoint, extra_epochs, start_epoch)
