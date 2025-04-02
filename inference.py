@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
-from model import GateCNN
+from gateCNN import GateCNN 
+from baseCNN import BaseCNN
+from CRNN import CRNN
 from PIL import Image
 import glob
 import os
@@ -28,7 +30,6 @@ class OCRDataset(Dataset):
             image = self.transform(image)
         return image, image_path
 
-# Greedy decoding function for CTC output.
 def ctc_greedy_decoder(logits, blank=0):
     pred_indices = torch.argmax(logits, dim=0)  # shape (T,)
     pred_tokens = []
@@ -45,18 +46,29 @@ def run_inference():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Inference on device:", device)
 
-    # Hyperparameters and model configuration
-    num_gateblocks = 8
+    # Hyperparameters
+    # num_gateblocks = 8
     input_channels = 3
-    mid1_channels = 64
-    mid2_channels = 512
-    model_name = "GateCNN_v4_epoch15_gates8_64_512_channel3_lr0.001_batchsize8"
+    # mid1_channels = 64
+    # mid2_channels = 512
+    hidden_channels = 256
+    pretrained = True
+    backbone = "resnet50"
+    num_lstm_layers = 2
+    model_name = "CRNN_epoch14_resnet50_True_lstmhidden256_lstmlayer2_channel3_lr0.001_batchsize32"
 
-    # Instantiate the model and move it to the device
-    model = GateCNN(num_classes=num_classes, num_gateblocks=num_gateblocks,
-                    input_channels=input_channels, mid1_channels=mid1_channels,
-                    mid2_channels=mid2_channels)
-    model = nn.DataParallel(model)
+    # Instantiate the model
+    # model = GateCNN(num_classes=num_classes, num_gateblocks=num_gateblocks,
+    #                 input_channels=input_channels, mid1_channels=mid1_channels,
+    #                 mid2_channels=mid2_channels)
+    # model = BaseCNN(num_classes=num_classes, hidden_channels=hidden_channels)
+    model = CRNN(num_chars=num_classes, hidden_size=hidden_channels, backbone=backbone, pretrained=pretrained,
+        num_lstm_layers=num_lstm_layers)
+
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "4,5"
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs for training.")
+        model = nn.DataParallel(model)
     model = model.to(device)
     checkpoint = torch.load(f"checkpoints/{model_name}.pth", map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -70,7 +82,7 @@ def run_inference():
     dataset = OCRDataset(folder_path=test_folder, transform=transform)
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
 
-    results = []  # to store each row as [ground_truth, prediction]
+    results = []
     correct = 0
     total = 0
 
@@ -81,12 +93,11 @@ def run_inference():
             logits = logits.squeeze(0)  # (num_classes, T)
             pred_str = ctc_greedy_decoder(logits, blank=0)
 
-            # Extract ground truth from the file name (everything before "-0.png")
             base_name = os.path.basename(image_path[0])
             if "-0.png" in base_name:
                 ground_truth = base_name.split("-0.png")[0]
             else:
-                ground_truth = base_name  # fallback if pattern not found
+                ground_truth = base_name
 
             results.append([ground_truth, pred_str])
             total += 1
@@ -96,7 +107,6 @@ def run_inference():
             print(f"{ground_truth} -> {pred_str}")
 
     accuracy = correct / total if total > 0 else 0.0
-    # Append a final row with the accuracy
     results.append(["Accuracy", f"{accuracy:.4f}"])
 
     # Write the results to a CSV file

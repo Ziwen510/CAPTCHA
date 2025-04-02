@@ -1,14 +1,15 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from model import GateCNN 
+from gateCNN import GateCNN 
+from baseCNN import BaseCNN
+from CRNN import CRNN
 from PIL import Image
 import glob
 import os
 from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader
 import csv
-import argparse
 
 characters = "abcdefghijklmnopqrstuvwxyz0123456789"
 char_to_idx = {char: idx + 1 for idx, char in enumerate(characters)}
@@ -46,29 +47,33 @@ def ocr_collate_fn(batch):
     targets_concat = torch.cat(targets)
     return images, targets_concat, target_lengths
 
-def train_model(resume_checkpoint=None, extra_epochs=5, start_epoch=5):
-    # Select device (ensure CUDA is available)
+def train_model(resume_checkpoint=None, extra_epochs=20, start_epoch=0):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Training on device:", device)
 
-    # Hyperparameters and model configuration
-    model_name = "GateCNN_v4"
-    num_gateblocks = 8
+    # Hyperparameters
+    model_name = "CRNN"
+    # num_gateblocks = 8
+    # mid1_channels = 64
+    # mid2_channels = 512
     input_channels = 3
-    # Base number of epochs if training from scratch
-    base_epochs = 5
-    batch_size = 8
+    batch_size = 64
     learning_rate = 1e-3
-    mid1_channels = 64
-    mid2_channels = 512
+    hidden_channels = 256
+    pretrained = True
+    backbone = "resnet50"
+    num_lstm_layers = 4
 
-    # Instantiate the model and move it to the device
-    model = GateCNN(num_classes=num_classes, num_gateblocks=num_gateblocks,
-                    input_channels=input_channels, mid1_channels=mid1_channels,
-                    mid2_channels=mid2_channels)
+    # Instantiate the model
+    # model = GateCNN(num_classes=num_classes, num_gateblocks=num_gateblocks,
+    #                 input_channels=input_channels, mid1_channels=mid1_channels,
+    #                 mid2_channels=mid2_channels)
+    # model = BaseCNN(num_classes=num_classes, hidden_channels=hidden_channels)
+    model = CRNN(num_chars=num_classes, hidden_size=hidden_channels, backbone=backbone, pretrained=pretrained,
+        num_lstm_layers=num_lstm_layers)
     model = model.to(device)
     
-    # If multiple GPUs are available, use DataParallel
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
     if torch.cuda.device_count() > 1:
         print(f"Using {torch.cuda.device_count()} GPUs for training.")
         model = nn.DataParallel(model)
@@ -76,7 +81,7 @@ def train_model(resume_checkpoint=None, extra_epochs=5, start_epoch=5):
     model.train()
 
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    ctc_loss_fn = nn.CTCLoss(blank=0, zero_infinity=True)
+    ctc_loss_fn = nn.CTCLoss(blank=0, reduction='mean', zero_infinity=True)
     transform = transforms.Compose([
         # transforms.Resize((32, 128)),
         transforms.ToTensor()
@@ -88,22 +93,21 @@ def train_model(resume_checkpoint=None, extra_epochs=5, start_epoch=5):
 
     checkpoint_dir = "checkpoints"
     os.makedirs(checkpoint_dir, exist_ok=True)
+    training_loss_dir = "traning_loss"
+    os.makedirs(training_loss_dir, exist_ok=True)
 
-    # If resuming from a checkpoint, load the model and optimizer states and set the start epoch.
     if resume_checkpoint is not None and os.path.exists(resume_checkpoint):
         print(f"Resuming from checkpoint: {resume_checkpoint}")
         checkpoint = torch.load(resume_checkpoint, map_location=device)
-        # model.load_state_dict(checkpoint['model_state_dict'])
+        model.load_state_dict(checkpoint['model_state_dict'])
         # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        model.load_state_dict(checkpoint)
-        total_epochs = start_epoch + extra_epochs
+        # model.load_state_dict(checkpoint)
         print(f"Resuming training from epoch {start_epoch} for {extra_epochs} additional epochs (total epochs: {total_epochs}).")
     else:
         if resume_checkpoint is not None:
             print(f"Checkpoint file {resume_checkpoint} not found. Starting training from scratch.")
-        start_epoch = 0
-        total_epochs = base_epochs
-
+    
+    total_epochs = start_epoch + extra_epochs
     for epoch in range(start_epoch, total_epochs):
         losses_log = []
         count = 0
@@ -129,17 +133,20 @@ def train_model(resume_checkpoint=None, extra_epochs=5, start_epoch=5):
             print(f"Epoch {epoch+1}/{total_epochs} Batch {count}, Loss: {loss.item():.4f}")
             losses_log.append([epoch+1, count, loss.item()])
 
-        # Write loss log to a CSV file after each epoch
-        csv_filename = f"losses_{model_name}_epoch{epoch+1}_gates{num_gateblocks}_{mid1_channels}_{mid2_channels}_channel{input_channels}_lr{learning_rate}_batchsize{batch_size}.csv"
-        csv_path = os.path.join(checkpoint_dir, csv_filename)
+        # name = f"{model_name}_epoch{epoch+1}_gates{num_gateblocks}_{mid1_channels}_{mid2_channels}_channel{input_channels}_lr{learning_rate}_batchsize{batch_size}"
+        name = f"{model_name}_epoch{epoch+1}_{backbone}_{pretrained}_lstmhidden{hidden_channels}_lstmlayer{num_lstm_layers}_channel{input_channels}_lr{learning_rate}_batchsize{batch_size}"
+        
+        # Write loss to a CSV file
+        csv_filename = f"losses_{name}.csv"
+        csv_path = os.path.join(training_loss_dir, csv_filename)
         with open(csv_path, mode="w", newline="") as csv_file:
             writer = csv.writer(csv_file)
             writer.writerow(["Epoch", "Batch", "Loss"])
             writer.writerows(losses_log)
         print(f"Loss log for epoch {epoch+1} saved at {csv_path}")
 
-        # Save a checkpoint after the end of each epoch
-        checkpoint_filename = f"{model_name}_epoch{epoch+1}_gates{num_gateblocks}_{mid1_channels}_{mid2_channels}_channel{input_channels}_lr{learning_rate}_batchsize{batch_size}.pth"
+        # Save a checkpoint
+        checkpoint_filename = f"{name}.pth"
         checkpoint_path_epoch = os.path.join(checkpoint_dir, checkpoint_filename)
         torch.save({
             'epoch': epoch,
@@ -149,7 +156,7 @@ def train_model(resume_checkpoint=None, extra_epochs=5, start_epoch=5):
         print(f"Checkpoint for epoch {epoch+1} saved at {checkpoint_path_epoch}")
 
 if __name__ == "__main__":
-    resume_checkpoint = "checkpoints/GateCNN_v4_epoch5_gates8_64_512_channel3_lr0.001_batchsize8.pth"
-    extra_epochs = 10
-    start_epoch = 5
-    train_model(resume_checkpoint, extra_epochs, start_epoch)
+    # resume_checkpoint = "checkpoints/BaseCNN_epoch15_hidden128_channel3_lr0.001_batchsize16.pth"
+    # extra_epochs = 10
+    # start_epoch = 15
+    train_model()
